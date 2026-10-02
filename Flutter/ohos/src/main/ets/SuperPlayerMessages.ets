@@ -1,8 +1,9 @@
 import { BinaryMessenger } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BinaryMessenger';
 import StandardMessageCodec from '@ohos/flutter_ohos/src/main/ets/plugin/common/StandardMessageCodec';
 import BasicMessageChannel, { Reply } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BasicMessageChannel';
-import { ITXVodPlayCallback, TXVodDef, TXVodPlayConfig, TXVodPlayer, V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveProperty } from 'liteavsdk';
+import { ITXVodPlayCallback, TXVodDef, TXVodPlayConfig, TXVodPlayer, V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveRecordMode, V2TXLiveProperty } from 'liteavsdk';
 import common from '@ohos.app.ability.common';
+import image from '@ohos.multimedia.image';
 import { ByteBuffer } from '@ohos/flutter_ohos/src/main/ets/util/ByteBuffer';
 
 const PREFIX = 'dev.flutter.pigeon.super_player.';
@@ -137,7 +138,7 @@ class LivePlayer {
     const channel = new BasicMessageChannel<Object>(messenger, `${PREFIX}TXLivePlayerFlutterAPI.${method}.${this.id}`, codec);
     channel.send([args]);
   }
-  callback(messenger: BinaryMessenger, method: string, args: Array<Object>): void {
+  callback(messenger: BinaryMessenger, method: string, args: Array<ESObject>): void {
     const channel = new BasicMessageChannel<Object>(messenger, `${PREFIX}TXLivePlayerFlutterAPI.${method}.${this.id}`, codec);
     channel.send(args);
   }
@@ -264,6 +265,21 @@ class LivePlayerObserver implements V2TXLivePlayerObserver {
     event.set('EVT_PARAM2', height);
     this.livePlayer.event(this.messenger, 'onPlayerEvent', event);
   }
+  onSnapshotComplete(_player: V2TXLivePlayer, pixelMap: image.PixelMap): void {
+    this.sendSnapshot(pixelMap);
+  }
+  private async sendSnapshot(pixelMap: image.PixelMap): Promise<void> {
+    let packer: image.ImagePacker | null = null;
+    try {
+      packer = image.createImagePacker();
+      const imageData: ArrayBuffer = await packer.packing(pixelMap, { format: 'image/png', quality: 100 });
+      this.livePlayer.callback(this.messenger, 'onSnapshotComplete', [new Uint8Array(imageData)]);
+    } catch (_error) {
+      this.livePlayer.callback(this.messenger, 'onSnapshotComplete', [null]);
+    } finally {
+      if (packer !== null) await packer.release();
+    }
+  }
   onLocalRecordBegin(_player: V2TXLivePlayer, code: number, path: string): void { this.livePlayer.callback(this.messenger, 'onLocalRecordBegin', [code, path]); }
   onLocalRecording(_player: V2TXLivePlayer, duration: number, path: string): void { this.livePlayer.callback(this.messenger, 'onLocalRecording', [duration, path]); }
   onLocalRecordComplete(_player: V2TXLivePlayer, code: number, path: string): void { this.livePlayer.callback(this.messenger, 'onLocalRecordComplete', [code, path]); }
@@ -276,6 +292,18 @@ function setupChannel(messenger: BinaryMessenger, name: string, handler: (args: 
 }
 function playerById(playerId: number): LivePlayer { const player = players.get(playerId); if (!player) throw new Error('player not found'); return player; }
 function playerFrom(args: Array<Object>): LivePlayer { return playerById((args[0] as PlayerMsg).playerId); }
+
+function startLiveRecording(player: LivePlayer, values: Map<string, Object>): void {
+  const filePath = values.get('filePath');
+  if (typeof filePath !== 'string' || filePath.length === 0) throw new Error('recording filePath is required');
+  const params = new V2TXLiveLocalRecordingParams();
+  params.filePath = filePath;
+  params.recordMode = V2TXLiveRecordMode.V2TXLiveRecordModeBoth;
+  const interval = values.get('interval');
+  if (typeof interval === 'number') params.interval = interval;
+  const result = player.player.startLocalRecording(params);
+  if (result !== 0) throw new Error(`startLocalRecording failed: ${result}`);
+}
 
 export function setupSuperPlayerApi(messenger: BinaryMessenger, context: common.Context): void {
   livePremier = getV2TXLivePremierShareInstance(context);
@@ -362,8 +390,14 @@ function registerLiveChannels(messenger: BinaryMessenger, id: number): void {
     const enable = (args[0] as BoolMsg).value;
     return new BoolMsg(get().player.setProperty(V2TXLiveProperty.kV2EnableHardwareAcceleration, enable) === 0);
   });
-  setupChannel(messenger, `${pfx}snapshot${suffix}`, () => null);
-  setupChannel(messenger, `${pfx}startLocalRecording${suffix}`, (args) => { const map = args[0] as Map<string, Object>; const params = new V2TXLiveLocalRecordingParams(); params.filePath = map.get('filePath') as string; params.interval = map.get('interval') as number; return get().player.startLocalRecording(params); });
+  setupChannel(messenger, `${pfx}snapshot${suffix}`, () => {
+    const livePlayer = get();
+    if (livePlayer.player.snapshot() !== 0) {
+      livePlayer.callback(messenger, 'onSnapshotComplete', [null]);
+    }
+    return null;
+  });
+  setupChannel(messenger, `${pfx}startLocalRecording${suffix}`, (args) => { startLiveRecording(get(), args[0] as Map<string, Object>); return null; });
   setupChannel(messenger, `${pfx}stopLocalRecording${suffix}`, () => { get().player.stopLocalRecording(); return null; });
 }
 
