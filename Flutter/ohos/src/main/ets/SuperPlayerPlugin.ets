@@ -1,9 +1,10 @@
 import { BinaryMessenger, FlutterPlugin, FlutterPluginBinding, PlatformView, PlatformViewFactory, StandardMessageCodec, MethodChannel, StandardMethodCodec } from '@ohos/flutter_ohos';
 import common from '@ohos.app.ability.common';
 import { Params } from '@ohos/flutter_ohos/src/main/ets/plugin/platform/PlatformView';
-import { registerRenderView as registerNativeRenderView, setupSuperPlayerApi, unregisterRenderView as unregisterNativeRenderView } from './SuperPlayerMessages';
+import { registerRenderTarget, setupSuperPlayerApi, unregisterRenderTarget } from './SuperPlayerMessages';
 
 const VIEW_TYPE = 'FTXRenderViewType';
+class RenderSurfaceController extends XComponentController {}
 
 class RenderView extends PlatformView {
   private channel: MethodChannel;
@@ -17,9 +18,12 @@ class RenderView extends PlatformView {
     return new WrappedBuilder(RenderBuilder);
   }
   getComponentId(): string { return `${VIEW_TYPE}_${this.viewId}`; }
-  registerRenderView(): void { registerNativeRenderView(this.viewId, this.getComponentId()); }
+  getViewId(): number { return this.viewId; }
+  registerRenderTarget(surfaceId: string): void {
+    registerRenderTarget(this.viewId, this.getComponentId(), surfaceId);
+  }
   dispose(): void {
-    unregisterNativeRenderView(this.viewId);
+    unregisterRenderTarget(this.viewId);
     this.channel.setMethodCallHandler(null);
   }
 }
@@ -33,18 +37,21 @@ function RenderBuilder(params: Params) {
 struct RenderSurface {
   @Prop params: Params;
   private renderView: RenderView = this.params.platformView as RenderView;
+  private surfaceController: RenderSurfaceController = new RenderSurfaceController();
 
   build() {
     Column() {
       XComponent({
         id: this.renderView.getComponentId(),
         type: XComponentType.SURFACE,
-        libraryname: 'liteavsdk'
+        libraryname: 'liteavsdk',
+        controller: this.surfaceController
       })
         .width('100%')
         .height('100%')
         .onLoad(() => {
-          this.renderView.registerRenderView();
+          const surfaceId = this.surfaceController.getXComponentSurfaceId();
+          this.renderView.registerRenderTarget(surfaceId);
         })
     }
     .width('100%')

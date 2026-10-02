@@ -799,6 +799,10 @@ class TXVodPlayerController extends ChangeNotifier implements ValueListenable<TX
         }
         break;
       default:
+        final Object? rawEventCode = map['event'];
+        if (rawEventCode is int && rawEventCode < 0) {
+          _changeState(TXPlayerState.failed);
+        }
         break;
     }
     _eventStreamController.add(map);

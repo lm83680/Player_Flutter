@@ -1,7 +1,7 @@
 import { BinaryMessenger } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BinaryMessenger';
 import StandardMessageCodec from '@ohos/flutter_ohos/src/main/ets/plugin/common/StandardMessageCodec';
 import BasicMessageChannel, { Reply } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BasicMessageChannel';
-import { V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveProperty } from 'liteavsdk';
+import { ITXVodPlayCallback, TXVodDef, TXVodPlayConfig, TXVodPlayer, V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveProperty } from 'liteavsdk';
 import common from '@ohos.app.ability.common';
 import { ByteBuffer } from '@ohos/flutter_ohos/src/main/ets/util/ByteBuffer';
 
@@ -10,9 +10,11 @@ const VIEW_TYPE = 'FTXRenderViewType';
 class Codec extends StandardMessageCodec {
   writeValue(stream: ByteBuffer, value: ESObject): ESObject {
     if (value instanceof PlayerMsg) { stream.writeUint8(129); return this.writeValue(stream, [value.playerId]); }
+    if (value instanceof VodPlayConfigMsg) { stream.writeUint8(139); return this.writeValue(stream, value.values); }
     if (value instanceof BoolMsg) { stream.writeUint8(145); return this.writeValue(stream, [value.value]); }
     if (value instanceof IntMsg) { stream.writeUint8(146); return this.writeValue(stream, [value.value]); }
     if (value instanceof StringMsg) { stream.writeUint8(147); return this.writeValue(stream, [value.value]); }
+    if (value instanceof DoubleMsg) { stream.writeUint8(149); return this.writeValue(stream, [value.value]); }
     return super.writeValue(stream, value);
   }
   readValueOfType(type: number, buffer: ByteBuffer): ESObject {
@@ -31,12 +33,20 @@ class Codec extends StandardMessageCodec {
         const value = this.readValue(buffer) as Array<Object>;
         return new StringMsg(value[1] as string, value[0] as number);
       }
+      case 137: {
+        const value = this.readValue(buffer) as Array<Object>;
+        return new DoubleMsg(value[1] as number, value[0] as number);
+      }
+      case 139:
+        return new VodPlayConfigMsg(this.readValue(buffer) as Array<ESObject>);
       case 145:
         return new BoolMsg((this.readValue(buffer) as Array<Object>)[0] as boolean);
       case 146:
         return new IntMsg((this.readValue(buffer) as Array<Object>)[0] as number);
       case 147:
         return new StringMsg((this.readValue(buffer) as Array<Object>)[0] as string);
+      case 149:
+        return new DoubleMsg((this.readValue(buffer) as Array<Object>)[0] as number);
       default:
         return super.readValueOfType(type, buffer);
     }
@@ -55,6 +65,11 @@ class IntMsg {
   value: number;
   constructor(value: number) { this.value = value; }
 }
+class DoubleMsg {
+  value: number;
+  playerId?: number;
+  constructor(value: number, playerId?: number) { this.value = value; this.playerId = playerId; }
+}
 class StringMsg {
   value: string;
   playerId?: number;
@@ -65,9 +80,18 @@ class LicenseMessage {
   licenseKey: string;
   constructor(licenseUrl: string, licenseKey: string) { this.licenseUrl = licenseUrl; this.licenseKey = licenseKey; }
 }
+class VodPlayConfigMsg {
+  values: Array<ESObject>;
+  constructor(values: Array<ESObject>) { this.values = values; }
+}
 const codec = new Codec();
 const players = new Map<number, LivePlayer>();
-const renderViewIds = new Map<number, string>();
+const vodPlayers = new Map<number, VodPlayer>();
+interface RenderTarget {
+  componentId: string;
+  surfaceId: string;
+}
+const renderTargets = new Map<number, RenderTarget>();
 let livePremier: V2TXLivePremier | null = null;
 let liveLogConfig: V2TXLiveLogConfig | null = null;
 let nextId = 1;
@@ -133,23 +157,84 @@ function playerErrorEvent(code: number, message: string): Map<string, Object> {
 
 function bindRenderView(player: LivePlayer, viewId: number): void {
   player.renderViewId = viewId;
-  const componentId = renderViewIds.get(viewId);
-  if (componentId) {
-    player.player.setRenderView(componentId);
+  const target = renderTargets.get(viewId);
+  if (target) {
+    player.player.setRenderView(target.componentId);
   }
 }
 
-export function registerRenderView(viewId: number, componentId: string): void {
-  renderViewIds.set(viewId, componentId);
+function bindVodRenderTarget(player: VodPlayer, viewId: number): void {
+  if (player.renderViewId !== viewId) player.renderTargetReady = false;
+  player.renderViewId = viewId;
+  const target = renderTargets.get(viewId);
+  if (target) {
+    // TXVodPlayer requires the render target to be set before startVodPlay.
+    // PlatformView's Dart callback can arrive before XComponent.onLoad, so
+    // defer a pending URL until the surface has actually been created.
+    player.player.setVideoRenderTarget(target.surfaceId);
+    player.renderTargetReady = true;
+    player.startPendingUrl();
+  }
+}
+
+export function registerRenderTarget(viewId: number, componentId: string, surfaceId: string): void {
+  renderTargets.set(viewId, { componentId, surfaceId });
   players.forEach((player: LivePlayer) => {
     if (player.renderViewId === viewId) {
       player.player.setRenderView(componentId);
     }
   });
+  vodPlayers.forEach((player: VodPlayer) => {
+    if (player.renderViewId === viewId) bindVodRenderTarget(player, viewId);
+  });
 }
 
-export function unregisterRenderView(viewId: number): void {
-  renderViewIds.delete(viewId);
+export function unregisterRenderTarget(viewId: number): void {
+  renderTargets.delete(viewId);
+  vodPlayers.forEach((player: VodPlayer) => {
+    if (player.renderViewId === viewId) player.renderTargetReady = false;
+  });
+}
+
+class VodPlayer {
+  id: number;
+  player: TXVodPlayer;
+  renderViewId?: number;
+  renderTargetReady: boolean = false;
+  pendingUrl?: string;
+  constructor(id: number, context: common.Context, messenger: BinaryMessenger) {
+    this.id = id;
+    this.player = new TXVodPlayer(context);
+    const callback: ITXVodPlayCallback = {
+      onPlayEvent: (_player: TXVodPlayer, event: number, eventData?: Map<string, TXVodDef.ParamType>): void => {
+        const payload = new Map<string, Object>();
+        payload.set('event', event);
+        eventData?.forEach((value: TXVodDef.ParamType, key: string) => payload.set(key, value as Object));
+        this.send(messenger, 'onPlayerEvent', payload);
+      },
+      onNetStatus: (_player: TXVodPlayer, statusData: Map<string, TXVodDef.ParamType>): void => {
+        const payload = new Map<string, Object>();
+        statusData.forEach((value: TXVodDef.ParamType, key: string) => payload.set(key, value as Object));
+        this.send(messenger, 'onNetEvent', payload);
+      }
+    };
+    this.player.setVodPlayCallback(callback);
+  }
+  send(messenger: BinaryMessenger, method: string, payload: Map<string, Object>): void {
+    const channelName = `${PREFIX}TXVodPlayerFlutterAPI.${method}.${this.id}`;
+    const channel = new BasicMessageChannel<Object>(messenger, channelName, codec);
+    channel.send([payload]);
+  }
+  start(url: string): void {
+    this.pendingUrl = url;
+    this.startPendingUrl();
+  }
+  startPendingUrl(): void {
+    const url = this.pendingUrl;
+    if (!url || !this.renderTargetReady) return;
+    this.pendingUrl = undefined;
+    this.player.startVodPlay(TXVodDef.TXPlayInfoParams.createWithUrl(url));
+  }
 }
 
 class LivePlayerObserver implements V2TXLivePlayerObserver {
@@ -198,13 +283,30 @@ export function setupSuperPlayerApi(messenger: BinaryMessenger, context: common.
   const global = `${PREFIX}TXFlutterSuperPlayerPluginAPI.`;
   setupChannel(messenger, `${global}getLiteAVSDKVersion`, () => new StringMsg('13.2.0.8729'));
   setupChannel(messenger, `${global}createLivePlayer`, () => { const id = nextId++; players.set(id, new LivePlayer(id, context, messenger)); registerLiveChannels(messenger, id); return new PlayerMsg(id); });
-  setupChannel(messenger, `${global}createVodPlayer`, () => { throw new Error('VOD bridge is not implemented in the Flutter OHOS adapter'); });
+  setupChannel(messenger, `${global}createVodPlayer`, () => {
+    const id = nextId++;
+    vodPlayers.set(id, new VodPlayer(id, context, messenger));
+    registerVodChannels(messenger, id);
+    return new PlayerMsg(id);
+  });
   setupChannel(messenger, `${global}setGlobalLicense`, (args) => {
     const license = args[0] as LicenseMessage;
     livePremier?.setLicence(license.licenseUrl, license.licenseKey);
     return null;
   });
-  setupChannel(messenger, `${global}releasePlayer`, (args) => { const p = playerFrom(args); releaseV2TXLivePlayer(p.player); players.delete(p.id); return null; });
+  setupChannel(messenger, `${global}releasePlayer`, (args) => {
+    const id = (args[0] as PlayerMsg).playerId;
+    const vodPlayer = vodPlayers.get(id);
+    if (vodPlayer) {
+      vodPlayer.player.stopPlay(true);
+      vodPlayers.delete(id);
+    } else {
+      const player = playerById(id);
+      releaseV2TXLivePlayer(player.player);
+      players.delete(id);
+    }
+    return null;
+  });
   setupChannel(messenger, `${global}setConsoleEnabled`, (args) => {
     if (liveLogConfig && livePremier) {
       liveLogConfig.enableConsole = (args[0] as BoolMsg).value;
@@ -263,4 +365,65 @@ function registerLiveChannels(messenger: BinaryMessenger, id: number): void {
   setupChannel(messenger, `${pfx}snapshot${suffix}`, () => null);
   setupChannel(messenger, `${pfx}startLocalRecording${suffix}`, (args) => { const map = args[0] as Map<string, Object>; const params = new V2TXLiveLocalRecordingParams(); params.filePath = map.get('filePath') as string; params.interval = map.get('interval') as number; return get().player.startLocalRecording(params); });
   setupChannel(messenger, `${pfx}stopLocalRecording${suffix}`, () => { get().player.stopLocalRecording(); return null; });
+}
+
+function registerVodChannels(messenger: BinaryMessenger, id: number): void {
+  const prefix = `${PREFIX}TXFlutterVodPlayerApi.`;
+  const suffix = `.${id}`;
+  const get = (): VodPlayer => {
+    const player = vodPlayers.get(id);
+    if (!player) throw new Error('VOD player not found');
+    return player;
+  };
+
+  setupChannel(messenger, `${prefix}startVodPlay${suffix}`, (args) => {
+    const vodPlayer = get();
+    const url = (args[0] as StringMsg).value;
+    vodPlayer.start(url);
+    return new BoolMsg(true);
+  });
+  setupChannel(messenger, `${prefix}setConfig${suffix}`, (args) => {
+    const configMessage: Array<ESObject> = (args[0] as VodPlayConfigMsg).values;
+    const config = new TXVodPlayConfig();
+    if (configMessage[1] !== null) config.connectRetryCount = configMessage[1] as number;
+    if (configMessage[2] !== null) config.connectRetryInterval = configMessage[2] as number;
+    if (configMessage[3] !== null) config.timeout = configMessage[3] as number;
+    if (configMessage[5] !== null) config.headers = configMessage[5] as Map<string, string>;
+    if (configMessage[6] !== null) config.enableAccurateSeek = configMessage[6] as boolean;
+    if (configMessage[8] !== null) config.smoothSwitchBitrate = configMessage[8] as boolean;
+    if (configMessage[10] !== null) config.progressInterval = configMessage[10] as number;
+    if (configMessage[11] !== null) config.maxBufferSize = configMessage[11] as number;
+    if (configMessage[12] !== null) config.maxPreloadSize = configMessage[12] as number;
+    if (configMessage[19] !== null) config.preferredResolution = configMessage[19] as number;
+    if (configMessage[20] !== null) config.mediaType = configMessage[20] as number;
+    get().player.setConfig(config);
+    return null;
+  });
+  setupChannel(messenger, `${prefix}stop${suffix}`, (args) => {
+    const vodPlayer = get();
+    vodPlayer.pendingUrl = undefined;
+    const clearLastFrame = (args[0] as BoolMsg).value;
+    const result = vodPlayer.player.stopPlay(clearLastFrame);
+    return new BoolMsg(result === 0);
+  });
+  setupChannel(messenger, `${prefix}isPlaying${suffix}`, () => new BoolMsg(get().player.isPlaying()));
+  setupChannel(messenger, `${prefix}pause${suffix}`, () => { get().player.pause(); return null; });
+  setupChannel(messenger, `${prefix}resume${suffix}`, () => { get().player.resume(); return null; });
+  setupChannel(messenger, `${prefix}setMute${suffix}`, (args) => { get().player.setMute((args[0] as BoolMsg).value); return null; });
+  setupChannel(messenger, `${prefix}seek${suffix}`, (args) => { get().player.seek((args[0] as DoubleMsg).value); return null; });
+  setupChannel(messenger, `${prefix}setRate${suffix}`, (args) => { get().player.setRate((args[0] as DoubleMsg).value); return null; });
+  setupChannel(messenger, `${prefix}setPlayerView${suffix}`, (args) => {
+    const viewId = args[0] as number;
+    bindVodRenderTarget(get(), viewId);
+    return null;
+  });
+  setupChannel(messenger, `${prefix}setRenderMode${suffix}`, (_args) => null);
+  setupChannel(messenger, `${prefix}enableHardwareDecode${suffix}`, (_args) => new BoolMsg(false));
+  setupChannel(messenger, `${prefix}getDuration${suffix}`, () => new DoubleMsg(get().player.getDuration()));
+  setupChannel(messenger, `${prefix}getCurrentPlaybackTime${suffix}`, () => new DoubleMsg(get().player.getCurrentPlaybackTime()));
+  setupChannel(messenger, `${prefix}getBufferDuration${suffix}`, () => new DoubleMsg(get().player.getBufferDuration()));
+  setupChannel(messenger, `${prefix}getPlayableDuration${suffix}`, () => new DoubleMsg(get().player.getPlayableDuration()));
+  setupChannel(messenger, `${prefix}getWidth${suffix}`, () => new IntMsg(get().player.getWidth()));
+  setupChannel(messenger, `${prefix}getHeight${suffix}`, () => new IntMsg(get().player.getHeight()));
+  setupChannel(messenger, `${prefix}setAutoPlay${suffix}`, (args) => { get().player.setAutoPlay((args[0] as BoolMsg).value); return null; });
 }
