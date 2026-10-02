@@ -127,6 +127,17 @@ class TXPlayerVideoState extends State<TXPlayerVideo> {
             onPlatformViewCreated: _onCreateIOSView
         ),
       );
+    } else if (defaultTargetPlatform == TargetPlatform.ohos) {
+      return IgnorePointer(
+        ignoring: true,
+        child: OhosView(
+          key: _platformViewKey,
+          viewType: _kFTXPlayerRenderViewType,
+          creationParams: const <String, dynamic>{},
+          creationParamsCodec: const StandardMessageCodec(),
+          onPlatformViewCreated: _onCreateOhosView,
+        ),
+      );
     } else {
       throw ArgumentError("platform not support: $defaultTargetPlatform");
     }
@@ -142,6 +153,15 @@ class TXPlayerVideoState extends State<TXPlayerVideo> {
   }
 
   void _onCreateIOSView(int id) {
+    if (_viewIdCompleter.isCompleted) {
+      _viewIdCompleter = Completer();
+    }
+    _viewId = id;
+    _viewIdCompleter.complete(id);
+    widget.onRenderViewCreatedListener?.call(id);
+  }
+
+  void _onCreateOhosView(int id) {
     if (_viewIdCompleter.isCompleted) {
       _viewIdCompleter = Completer();
     }

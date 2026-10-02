@@ -1,0 +1,19 @@
+name: super_player_ohos
+description: OpenHarmony implementation for the super_player Flutter plugin.
+version: 13.4.3
+homepage: https://github.com/LiteAVSDK/Player_Flutter
+
+environment:
+  sdk: '>=2.18.0 <4.0.0'
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      ohos:
+        package: com.tencent.vod.flutter
+        pluginClass: SuperPlayerPlugin

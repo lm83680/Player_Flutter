@@ -1,0 +1,11 @@
+{
+  "module": {
+    "name": "super_player",
+    "type": "har",
+    "deviceTypes": [
+      "default",
+      "tablet",
+      "2in1"
+    ]
+  }
+}

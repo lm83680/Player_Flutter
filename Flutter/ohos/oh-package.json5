@@ -1,0 +1,12 @@
+{
+  "name": "super_player",
+  "version": "13.4.3",
+  "description": "Tencent SuperPlayer Flutter plugin for OpenHarmony",
+  "main": "index.ets",
+  "types": "index.d.ets",
+  "dependencies": {
+    "@ohos/flutter_ohos": "file:./har/flutter.har",
+    "liteavsdk": "file:./har/LiteAVSDK_Professional_13.2.0.8729.har"
+  },
+  "license": "MIT"
+}
