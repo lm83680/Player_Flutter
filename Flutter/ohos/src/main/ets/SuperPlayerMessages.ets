@@ -1,7 +1,7 @@
 import { BinaryMessenger } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BinaryMessenger';
 import StandardMessageCodec from '@ohos/flutter_ohos/src/main/ets/plugin/common/StandardMessageCodec';
 import BasicMessageChannel, { Reply } from '@ohos/flutter_ohos/src/main/ets/plugin/common/BasicMessageChannel';
-import { ITXVodPlayCallback, TXVodDef, TXVodPlayConfig, TXVodPlayer, V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveRecordMode, V2TXLiveProperty } from 'liteavsdk';
+import { ITXVodPlayCallback, TXVodDef, TXVodPlayConfig, TXVodPlayer, V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePlayerStatistics, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveRecordMode, V2TXLiveProperty } from 'liteavsdk';
 import common from '@ohos.app.ability.common';
 import image from '@ohos.multimedia.image';
 import { ByteBuffer } from '@ohos/flutter_ohos/src/main/ets/util/ByteBuffer';
@@ -253,6 +253,12 @@ class LivePlayerObserver implements V2TXLivePlayerObserver {
   onVideoLoading(_player: V2TXLivePlayer, _extraInfo: ESObject): void { this.livePlayer.event(this.messenger, 'onPlayerEvent', playerEvent(2007)); }
   onVideoPlaying(_player: V2TXLivePlayer, _firstPlay: boolean, _extraInfo: ESObject): void {
     this.livePlayer.event(this.messenger, 'onPlayerEvent', playerEvent(2004));
+  }
+  onStatisticsUpdate(_player: V2TXLivePlayer, statistics: V2TXLivePlayerStatistics): void {
+    const status = new Map<string, Object>();
+    status.set('VIDEO_FPS', statistics.fps);
+    status.set('VIDEO_BITRATE', statistics.videoBitrate);
+    this.livePlayer.event(this.messenger, 'onNetEvent', status);
   }
   onError(_player: V2TXLivePlayer, code: number, message: string, _extraInfo: ESObject): void {
     this.livePlayer.event(this.messenger, 'onPlayerEvent', playerErrorEvent(code, message));
