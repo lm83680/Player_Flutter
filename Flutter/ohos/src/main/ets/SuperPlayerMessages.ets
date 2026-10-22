@@ -251,8 +251,11 @@ class LivePlayerObserver implements V2TXLivePlayerObserver {
     this.livePlayer.event(this.messenger, 'onPlayerEvent', playerEvent(2001));
   }
   onVideoLoading(_player: V2TXLivePlayer, _extraInfo: ESObject): void { this.livePlayer.event(this.messenger, 'onPlayerEvent', playerEvent(2007)); }
-  onVideoPlaying(_player: V2TXLivePlayer, _firstPlay: boolean, _extraInfo: ESObject): void {
+  onVideoPlaying(_player: V2TXLivePlayer, firstPlay: boolean, _extraInfo: ESObject): void {
     this.livePlayer.event(this.messenger, 'onPlayerEvent', playerEvent(2004));
+    if (firstPlay) {
+      this.livePlayer.event(this.messenger, 'onPlayerEvent', playerEvent(2003));
+    }
   }
   onStatisticsUpdate(_player: V2TXLivePlayer, statistics: V2TXLivePlayerStatistics): void {
     const status = new Map<string, Object>();
