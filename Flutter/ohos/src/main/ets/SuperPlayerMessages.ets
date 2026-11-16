@@ -274,6 +274,12 @@ class LivePlayerObserver implements V2TXLivePlayerObserver {
     event.set('EVT_PARAM2', height);
     this.livePlayer.event(this.messenger, 'onPlayerEvent', event);
   }
+  onReceiveSeiMessage(_player: V2TXLivePlayer, payloadType: number, data: ArrayBuffer): void {
+    const event = playerEvent(2012);
+    event.set('EVT_GET_MSG', new Uint8Array(data));
+    event.set('EVT_GET_MSG_TYPE', payloadType);
+    this.livePlayer.event(this.messenger, 'onPlayerEvent', event);
+  }
   onSnapshotComplete(_player: V2TXLivePlayer, pixelMap: image.PixelMap): void {
     this.sendSnapshot(pixelMap);
   }
@@ -378,6 +384,9 @@ export function setupSuperPlayerApi(messenger: BinaryMessenger, context: common.
     const enable = (args[0] as BoolMsg).value;
     return new BoolMsg(p.player.setProperty(V2TXLiveProperty.kV2EnableHardwareAcceleration, enable) === 0);
   });
+  setupChannel(messenger, `${live}enableReceiveSeiMessage`, (args) => {
+    return playerFrom(args).player.enableReceiveSeiMessage(args[1] as boolean, args[2] as number);
+  });
   setupChannel(messenger, `${live}snapshot`, () => null);
   setupChannel(messenger, `${live}startLocalRecording`, (args) => { const p = playerFrom(args); const map = args[0] as Map<string, Object>; const params = new V2TXLiveLocalRecordingParams(); params.filePath = map.get('filePath') as string; params.interval = map.get('interval') as number; return p.player.startLocalRecording(params); });
   setupChannel(messenger, `${live}stopLocalRecording`, (args) => { playerFrom(args).player.stopLocalRecording(); return null; });
@@ -398,6 +407,9 @@ function registerLiveChannels(messenger: BinaryMessenger, id: number): void {
   setupChannel(messenger, `${pfx}enableHardwareDecode${suffix}`, (args) => {
     const enable = (args[0] as BoolMsg).value;
     return new BoolMsg(get().player.setProperty(V2TXLiveProperty.kV2EnableHardwareAcceleration, enable) === 0);
+  });
+  setupChannel(messenger, `${pfx}enableReceiveSeiMessage${suffix}`, (args) => {
+    return get().player.enableReceiveSeiMessage(args[1] as boolean, args[2] as number);
   });
   setupChannel(messenger, `${pfx}snapshot${suffix}`, () => {
     const livePlayer = get();
