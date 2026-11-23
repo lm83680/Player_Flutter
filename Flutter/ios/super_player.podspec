@@ -86,7 +86,7 @@ player plugin.
   s.source_files = 'Classes/**/*'
   s.public_header_files = 'Classes/**/*.h'
   s.dependency 'Flutter'
-  s.ios.framework = ['MobileCoreServices']
+  s.ios.framework = ['MobileCoreServices', 'AVFoundation', 'CoreMedia', 'CoreVideo', 'CoreGraphics']
   s.platform = :ios, '12.0'
   s.static_framework = true
   s.resources = ['Classes/TXResource/**/*']

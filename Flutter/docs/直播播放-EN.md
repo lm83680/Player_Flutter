@@ -378,6 +378,26 @@ This API is used to resume live playback from time-shifting playback.
 _controller.resumeLive();
 ```
 
+## Video-only local recording
+
+Use `FTXLiveRecordMode.videoOnly` when the remote stream has no audio, or when the recording must contain no audio track. The default `both` mode continues to use the LiteAV audio/video recorder.
+
+```dart
+await controller.startLocalRecording(FTXLiveLocalRecordingParams(
+  filePath: '/writable/app/directory/silent.mp4',
+  interval: 1000,
+  recordMode: FTXLiveRecordMode.videoOnly,
+));
+// Keep video playback running while recording.
+await controller.stopLocalRecording();
+```
+
+The parent directory must exist and be writable, and the `.mp4` destination must not already exist. Listen to `FTXLiveListener.recordCompleteCallback` before using the completed file or starting another recording; stopping is asynchronous. Stopping playback or disposing the player also ends video-only recording.
+
+iOS reuses the existing decoded-video observer. Android preserves the SDK default renderer, and the bundled OpenHarmony SDK has no decoded-frame observer, so Android and OpenHarmony sample SDK video snapshots at up to approximately 15 fps; actual frame rate depends on snapshot and encoder throughput. Re-encoding adds processing overhead. OpenHarmony requires API 12+ for video-only recording and stops after five seconds without a writable video frame. Android stops after five seconds without a video snapshot.
+
+The existing callback codes apply. Start errors include `-2` (unsupported file extension), `-6` (recording already active), `-7` (destination exists), and `-8` (directory not writable). Completion codes include `0` (finalized), `-1` (encoder/muxer failure), `-2` (resolution/rotation changed), and `-3` (no valid video data). Missing audio does not trigger `-3` in video-only mode. Android and OpenHarmony detect resolution changes through snapshot dimensions.
+
 ## Listening for SDK Events
 All internal SDK status messages will be notified to you through `onPlayerEventBroadcast` (event notification) and `onPlayerNetStatusBroadcast` (status callback) messages.
 

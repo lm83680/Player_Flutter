@@ -15,3 +15,14 @@ unique id, matching the existing `TXPlayerVideo`/`setPlayerView` contract.
 The plugin currently supports live playback and player lifecycle/event
 callbacks through the bundled LiteAV SDK. VOD playback and unsupported native
 operations remain unavailable on OpenHarmony.
+
+## Video-only recording
+
+`FTXLiveLocalRecordingParams(recordMode: FTXLiveRecordMode.videoOnly)` uses a
+video-only system AVRecorder on API 12+. The bundled LiteAV HAR has no decoded
+video observer, so this mode samples original SDK video snapshots at up to 15 fps.
+Actual frame rate depends on snapshot and encoder throughput. No screen capture
+or microphone permission is required. A small CMake/N-API module copies RGBA/BGRA
+snapshots into the recorder's input Surface. Keep playback running, and wait for
+`recordCompleteCallback` before reading the MP4 or starting another recording.
+A five-second gap without a writable video frame ends the recording.

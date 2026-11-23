@@ -1,6 +1,7 @@
 // Copyright (c) 2022 Tencent. All rights reserved.
 
 #import "FTXLivePlayer.h"
+#import "FTXVideoOnlyRecorder.h"
 #import "FTXTransformation.h"
 #import "FTXLiteAVSDKHeader.h"
 #import <Flutter/Flutter.h>
@@ -32,6 +33,8 @@ static const int uninitialized = -1;
 @property (nonatomic, assign) BOOL restoreUI;
 @property (nonatomic, assign) CGSize liveSize;
 @property (nonatomic, assign) BOOL isMute;
+@property (atomic, strong) FTXVideoOnlyRecorder *videoRecorder;
+@property (atomic, assign) BOOL sdkRecording;
 @property (nonatomic, strong) FTXRenderViewFactory* renderViewFactory;
 @property (nonatomic, strong) FTXRenderView *curRenderView;
 @property (nonatomic, assign) NSUInteger renderMode;
@@ -111,6 +114,7 @@ static const int uninitialized = -1;
 }
 
 - (void)performDestroyOnCurrentThread {
+    [self.videoRecorder stop];
     if (![self markDestroyedIfNeeded]) {
         return;
     }
@@ -263,6 +267,7 @@ static const int uninitialized = -1;
 
 - (BOOL)stopPlay
 {
+    [self.videoRecorder stop];
     if (self.livePlayer != nil) {
         _isStoped = YES;
         self.lastPlayEvent = -1;
@@ -608,6 +613,20 @@ static const int uninitialized = -1;
 }
 
 - (void)startLocalRecordingLocalRecordingParams:(NSDictionary<NSString *,id> *)localRecordingParams error:(FlutterError * _Nullable __autoreleasing *)error {
+    NSString *path = [localRecordingParams[@"filePath"] isKindOfClass:NSString.class] ? localRecordingParams[@"filePath"] : @"";
+    NSInteger mode = [localRecordingParams[@"recordMode"] integerValue];
+    if (self.videoRecorder || self.sdkRecording) {
+        [self onLocalRecordBegin:self.livePlayer errCode:-6 storagePath:path];
+        return;
+    }
+    if (mode != 0 && mode != 1) {
+        *error = [FlutterError errorWithCode:@"invalid-record-mode" message:@"Invalid recording mode" details:nil];
+        return;
+    }
+    if (mode == 1) {
+        [self startVideoOnlyRecording:path interval:[localRecordingParams[@"interval"] integerValue]];
+        return;
+    }
     V2TXLiveLocalRecordingParams *params = [[V2TXLiveLocalRecordingParams alloc] init];
     
     if (localRecordingParams[@"filePath"] && [localRecordingParams[@"filePath"] isKindOfClass:[NSString class]]) {
@@ -618,11 +637,50 @@ static const int uninitialized = -1;
         params.interval = [localRecordingParams[@"interval"] intValue];
     }
     
-    [self.livePlayer startLocalRecording:params];
+    self.sdkRecording = YES;
+    NSInteger result = [self.livePlayer startLocalRecording:params];
+    if (result != 0) {
+        self.sdkRecording = NO;
+        *error = [FlutterError errorWithCode:@"recording-error" message:@"startLocalRecording failed" details:@(result)];
+    }
 }
 
 - (void)stopLocalRecordingWithError:(FlutterError * _Nullable __autoreleasing *)error {
-    [self.livePlayer stopLocalRecording];
+    if (self.videoRecorder) [self.videoRecorder stop];
+    else [self.livePlayer stopLocalRecording];
+}
+
+- (void)startVideoOnlyRecording:(NSString *)path interval:(NSInteger)interval {
+    NSFileManager *files = NSFileManager.defaultManager;
+    NSInteger code = 0;
+    if (![[path.pathExtension lowercaseString] isEqualToString:@"mp4"]) code = -2;
+    else if ([files fileExistsAtPath:path]) code = -7;
+    else if (![files isWritableFileAtPath:path.stringByDeletingLastPathComponent]) code = -8;
+    if (code != 0) {
+        [self onLocalRecordBegin:self.livePlayer errCode:code storagePath:path];
+        return;
+    }
+    // Capture the Flutter callback endpoint, not the player, so disposal still
+    // finalizes the file without retaining the entire player/render hierarchy.
+    TXLivePlayerFlutterAPI *api = self.liveFlutterApi;
+    __weak typeof(self) weakSelf = self;
+    NSError *writerError = nil;
+    self.videoRecorder = [[FTXVideoOnlyRecorder alloc] initWithPath:path interval:interval
+        progress:^(NSInteger duration) {
+            [api onLocalRecordingDurationMs:duration storagePath:path completion:^(FlutterError *error) {}];
+        } completion:^(NSInteger result) {
+            weakSelf.videoRecorder = nil;
+            [api onLocalRecordCompleteCode:result storagePath:path completion:^(FlutterError *error) {}];
+        } error:&writerError];
+    if (!self.videoRecorder) {
+        [self onLocalRecordBegin:self.livePlayer errCode:-1 storagePath:path];
+        return;
+    }
+    // BGRA observation is also used by PiP; leave that existing observer enabled.
+    NSInteger result = [self.livePlayer enableObserveVideoFrame:YES pixelFormat:V2TXLivePixelFormatBGRA32
+                                                    bufferType:V2TXLiveBufferTypePixelBuffer];
+    [self onLocalRecordBegin:self.livePlayer errCode:result storagePath:path];
+    if (result != 0) [self.videoRecorder stop];
 }
 
 - (void)snapshotWithError:(FlutterError * _Nullable __autoreleasing *)error {
@@ -827,6 +885,7 @@ static const int uninitialized = -1;
  * @note  需要您调用 {@link enableObserveVideoFrame} 开启回调开关。
  */
 - (void)onRenderVideoFrame:(id<V2TXLivePlayer>)player frame:(V2TXLiveVideoFrame *)videoFrame {
+    [self.videoRecorder appendPixelBuffer:videoFrame.pixelBuffer rotation:videoFrame.rotation];
     if (self.isStartEnterPipMode) {
         [[FTXPipController shareInstance] displayPixelBuffer:videoFrame.pixelBuffer];
     }
@@ -909,6 +968,7 @@ static const int uninitialized = -1;
  * @param storagePath 录制的文件地址。
  */
 - (void)onLocalRecordBegin:(id<V2TXLivePlayer>)player errCode:(NSInteger)errCode storagePath:(NSString *)storagePath {
+    if (errCode != 0 && errCode != -6) self.sdkRecording = NO;
     [self.liveFlutterApi onLocalRecordBeginCode:errCode storagePath:storagePath completion:^(FlutterError * _Nullable error) {
         if (nil != error) {
             FTXLOGE(@"callback message error:%@", error);
@@ -946,6 +1006,7 @@ static const int uninitialized = -1;
  * @param storagePath 录制的文件地址。
  */
 - (void)onLocalRecordComplete:(id<V2TXLivePlayer>)player errCode:(NSInteger)errCode storagePath:(NSString *)storagePath {
+    self.sdkRecording = NO;
     [self.liveFlutterApi onLocalRecordCompleteCode:errCode storagePath:storagePath completion:^(FlutterError * _Nullable error) {
         if (nil != error) {
             FTXLOGE(@"callback message error:%@", error);

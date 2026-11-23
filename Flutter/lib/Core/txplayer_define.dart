@@ -949,19 +949,31 @@ class FSteamInfo {
   }
 }
 
+/// Selects the tracks written to a local live recording.
+enum FTXLiveRecordMode {
+  /// Records audio and video using the LiteAV recorder (default).
+  both,
+
+  /// Records video only. No microphone or incoming audio track is required.
+  videoOnly,
+}
+
 class FTXLiveLocalRecordingParams {
   String filePath;
   int interval;
+  FTXLiveRecordMode recordMode;
 
   FTXLiveLocalRecordingParams({
     required this.filePath,
     this.interval = -1,
+    this.recordMode = FTXLiveRecordMode.both,
   });
 
   Map<String, Object> toJson() {
     return {
       'filePath': filePath,
       'interval': interval,
+      'recordMode': recordMode.index,
     };
   }
 
@@ -969,6 +981,7 @@ class FTXLiveLocalRecordingParams {
     return FTXLiveLocalRecordingParams(
       filePath: json['filePath'] as String,
       interval: json['interval'] as int? ?? -1,
+      recordMode: FTXLiveRecordMode.values[json['recordMode'] as int? ?? 0],
     );
   }
 }

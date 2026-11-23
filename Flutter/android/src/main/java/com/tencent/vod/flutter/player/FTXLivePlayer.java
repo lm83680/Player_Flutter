@@ -40,6 +40,7 @@ import com.tencent.vod.flutter.ui.render.FTXRenderView;
 import com.tencent.vod.flutter.ui.render.FTXRenderViewFactory;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -70,6 +71,24 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
     private final FTXRenderViewFactory mRenderViewFactory;
     private final Handler mUIHandler = new Handler(Looper.getMainLooper());
     private boolean mIsMute = false;
+    private volatile FTXVideoOnlyRecorder mVideoRecorder;
+    private volatile boolean mSdkRecording;
+    private boolean mSnapshotPending;
+    private FTXVideoOnlyRecorder mSnapshotRecorder;
+    private boolean mUserSnapshotQueued;
+    private long mLastRecordSnapshotMs;
+    private final Runnable mRecordSnapshotTask = new Runnable() {
+        @Override public void run() {
+            FTXVideoOnlyRecorder recorder = mVideoRecorder;
+            if (recorder == null || mLivePlayer == null) return;
+            if (android.os.SystemClock.elapsedRealtime() - mLastRecordSnapshotMs > 5000) {
+                stopLocalRecording();
+                return;
+            }
+            if (!mSnapshotPending) requestSnapshot(recorder);
+            mUIHandler.postDelayed(this, 67);
+        }
+    };
     private int mCurrentVideoWidth = 0;
     private int mCurrentVideoHeight = 0;
     private long mCurrentRenderMode = FTXPlayerConstants.FTXRenderMode.ADJUST_RESOLUTION;
@@ -192,6 +211,7 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
     int stopPlay(boolean isNeedClearLastImg) {
         LiteavLog.i(TAG, "called stopPlay isNeedClearLastImg:" + isNeedClearLastImg);
         int result = Uninitialized;
+        stopLocalRecording();
         if (mLivePlayer != null) {
             mLastPlayEvent = -1;
             mIsPaused = false;
@@ -499,6 +519,18 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
 
     @Override
     public void startLocalRecording(@NonNull Map<String, Object> localRecordingParams) {
+        String path = (String) localRecordingParams.get("filePath");
+        Object modeValue = localRecordingParams.get("recordMode");
+        int mode = modeValue instanceof Number ? ((Number) modeValue).intValue() : 0;
+        if (mVideoRecorder != null || mSdkRecording) {
+            mLiveFlutterApi.onLocalRecordBegin(-6L, path == null ? "" : path, this);
+            return;
+        }
+        if (mode != 0 && mode != 1) throw new IllegalArgumentException("Invalid recording mode");
+        if (mode == 1) {
+            startVideoOnlyRecording(localRecordingParams, path);
+            return;
+        }
         V2TXLiveDef.V2TXLiveLocalRecordingParams params = new V2TXLiveDef.V2TXLiveLocalRecordingParams();
         if (localRecordingParams.containsKey("filePath")) {
             params.filePath = (String) localRecordingParams.get("filePath");
@@ -510,17 +542,72 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
                 params.interval = ((Number) interval).intValue();
             }
         }
-        mLivePlayer.startLocalRecording(params);
+        mSdkRecording = true;
+        int result = mLivePlayer.startLocalRecording(params);
+        if (result != 0) {
+            mSdkRecording = false;
+            throw new IllegalStateException("startLocalRecording failed: " + result);
+        }
     }
 
     @Override
     public void stopLocalRecording() {
-        mLivePlayer.stopLocalRecording();
+        FTXVideoOnlyRecorder recorder = mVideoRecorder;
+        if (recorder != null) {
+            mUIHandler.removeCallbacks(mRecordSnapshotTask);
+            recorder.stop();
+        } else if (mLivePlayer != null) {
+            mLivePlayer.stopLocalRecording();
+        }
+    }
+
+    private void startVideoOnlyRecording(Map<String, Object> values, String path) {
+        int code = 0;
+        if (path == null || !path.toLowerCase(Locale.ROOT).endsWith(".mp4")) code = -2;
+        else if (new File(path).exists()) code = -7;
+        if (code != 0) {
+            mLiveFlutterApi.onLocalRecordBegin((long) code, path == null ? "" : path, this);
+            return;
+        }
+        Object interval = values.get("interval");
+        try {
+            mVideoRecorder = new FTXVideoOnlyRecorder(path,
+                    interval instanceof Number ? ((Number) interval).intValue() : -1,
+                    new FTXVideoOnlyRecorder.Listener() {
+                        @Override public void onProgress(long durationMs) {
+                            mLiveFlutterApi.onLocalRecording(durationMs, path, FTXLivePlayer.this);
+                        }
+                        @Override public void onComplete(int result) {
+                            // This runs on the main thread, even after player disposal.
+                            mUIHandler.removeCallbacks(mRecordSnapshotTask);
+                            mVideoRecorder = null;
+                            mLiveFlutterApi.onLocalRecordComplete((long) result, path, FTXLivePlayer.this);
+                        }
+                    });
+        } catch (java.io.IOException e) {
+            mLiveFlutterApi.onLocalRecordBegin(new File(path).exists() ? -7L : -8L, path, this);
+            return;
+        }
+        mLastRecordSnapshotMs = android.os.SystemClock.elapsedRealtime();
+        mLiveFlutterApi.onLocalRecordBegin(0L, path, this);
+        mUIHandler.post(mRecordSnapshotTask);
     }
 
     @Override
     public void snapshot() {
-        mLivePlayer.snapshot();
+        if (mSnapshotPending) { mUserSnapshotQueued = true; return; }
+        requestSnapshot(null);
+    }
+
+    private void requestSnapshot(FTXVideoOnlyRecorder recorder) {
+        if (mLivePlayer == null) return;
+        mSnapshotPending = true;
+        mSnapshotRecorder = recorder;
+        if (mLivePlayer.snapshot() != 0) {
+            mSnapshotPending = false;
+            mSnapshotRecorder = null;
+            if (recorder == null) mLiveFlutterApi.onSnapshotComplete(null, this);
+        }
     }
 
     private void applyRenderMode() {
@@ -688,18 +775,34 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
         @Override
         public void onSnapshotComplete(V2TXLivePlayer player, Bitmap image) {
             super.onSnapshotComplete(player, image);
-            mSnapShortThreadMgr.execute(new Runnable() {
-                @Override
-                public void run() {
-                    ByteArrayOutputStream stream = new ByteArrayOutputStream();
-                    image.compress(Bitmap.CompressFormat.PNG, 100, stream);
-                    byte[] imageBytes = stream.toByteArray();
-                    mLivePlayer.mUIHandler.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            mLiveFlutterApi.onSnapshotComplete(imageBytes, FTXV2LiveObserver.this);
-                        }
+            // Snapshot memory belongs to LiteAV; retain an independent bitmap
+            // before dispatching to the main/encoding queues.
+            final Bitmap snapshot = image == null ? null : image.copy(Bitmap.Config.ARGB_8888, false);
+            mLivePlayer.mUIHandler.post(() -> {
+                FTXVideoOnlyRecorder recorder = mLivePlayer.mSnapshotRecorder;
+                mLivePlayer.mSnapshotRecorder = null;
+                mLivePlayer.mSnapshotPending = false;
+                if (recorder != null) {
+                    if (snapshot != null) {
+                        recorder.append(snapshot);
+                        snapshot.recycle();
+                        mLivePlayer.mLastRecordSnapshotMs = android.os.SystemClock.elapsedRealtime();
+                    }
+                } else if (!mSnapShortThreadMgr.isShutdown()) {
+                    mSnapShortThreadMgr.execute(() -> {
+                        ByteArrayOutputStream stream = new ByteArrayOutputStream();
+                        byte[] bytes = null;
+                        if (snapshot != null && snapshot.compress(Bitmap.CompressFormat.PNG, 100, stream)) bytes = stream.toByteArray();
+                        if (snapshot != null) snapshot.recycle();
+                        final byte[] result = bytes;
+                        mLivePlayer.mUIHandler.post(() -> mLiveFlutterApi.onSnapshotComplete(result, this));
                     });
+                } else if (snapshot != null) {
+                    snapshot.recycle();
+                }
+                if (mLivePlayer.mUserSnapshotQueued) {
+                    mLivePlayer.mUserSnapshotQueued = false;
+                    mLivePlayer.snapshot();
                 }
             });
         }
@@ -736,6 +839,7 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
         @Override
         public void onLocalRecordBegin(V2TXLivePlayer player, int code, String storagePath) {
             super.onLocalRecordBegin(player, code, storagePath);
+            if (code != 0 && code != -6) mLivePlayer.mSdkRecording = false;
             mLiveFlutterApi.onLocalRecordBegin((long) code, storagePath, this);
         }
 
@@ -748,6 +852,7 @@ public class FTXLivePlayer extends FTXLivePlayerRenderHost implements TXFlutterL
         @Override
         public void onLocalRecordComplete(V2TXLivePlayer player, int code, String storagePath) {
             super.onLocalRecordComplete(player, code, storagePath);
+            mLivePlayer.mSdkRecording = false;
             mLiveFlutterApi.onLocalRecordComplete((long) code, storagePath, this);
         }
 

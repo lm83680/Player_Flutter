@@ -1,4 +1,6 @@
+#### Unreleased
 
+- add `FTXLiveRecordMode.videoOnly` for local MP4 recording without an incoming audio track on Android, iOS, and OpenHarmony (snapshot sampling up to 15 fps on Android and OpenHarmony).
 
 #### Version: 13.4.2 2026.08.24
 

@@ -422,6 +422,9 @@ class TXLivePlayerController extends ChangeNotifier implements ValueListenable<T
     await _livePlayerApi.setRenderMode(renderMode.index);
   }
 
+  /// Starts an MP4 recording. Use [FTXLiveRecordMode.videoOnly] when the
+  /// incoming stream has no audio, or when the output must contain no audio.
+  /// Stop and wait for recordCompleteCallback before starting another recording.
   Future<void> startLocalRecording(FTXLiveLocalRecordingParams params) async {
     if (_isNeedDisposed) return;
     await _initPlayer.future;

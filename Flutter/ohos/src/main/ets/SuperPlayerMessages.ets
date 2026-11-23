@@ -4,6 +4,7 @@ import BasicMessageChannel, { Reply } from '@ohos/flutter_ohos/src/main/ets/plug
 import { ITXVodPlayCallback, TXVodDef, TXVodPlayConfig, TXVodPlayer, V2TXLivePlayer, V2TXLivePlayerObserver, V2TXLivePlayerStatistics, V2TXLivePremier, V2TXLiveLogConfig, V2TXLiveLogLevel, createV2TXLivePlayer, releaseV2TXLivePlayer, getV2TXLivePremierShareInstance, V2TXLiveFillMode, V2TXLiveLocalRecordingParams, V2TXLiveRecordMode, V2TXLiveProperty } from 'liteavsdk';
 import common from '@ohos.app.ability.common';
 import image from '@ohos.multimedia.image';
+import { VideoOnlyRecorder, VideoRecordingCallbacks } from './VideoOnlyRecorder';
 import { ByteBuffer } from '@ohos/flutter_ohos/src/main/ets/util/ByteBuffer';
 
 const PREFIX = 'dev.flutter.pigeon.super_player.';
@@ -103,8 +104,15 @@ class LivePlayer {
   renderViewId?: number;
   isMuted: boolean = false;
   isPaused: boolean = false;
+  videoRecorder: VideoOnlyRecorder | null = null;
+  sdkRecording: boolean = false;
+  private messenger: BinaryMessenger;
+  private snapshotPending: boolean = false;
+  private snapshotRecorder: VideoOnlyRecorder | null = null;
+  private userSnapshotQueued: boolean = false;
   constructor(id: number, context: common.Context, messenger: BinaryMessenger) {
     this.id = id;
+    this.messenger = messenger;
     this.player = createV2TXLivePlayer(context);
     const observer: V2TXLivePlayerObserver = new LivePlayerObserver(this, messenger);
     this.player.setObserver(observer);
@@ -116,6 +124,7 @@ class LivePlayer {
     return this.player.startPlay(url);
   }
   stopPlay(): number {
+    this.stopRecording();
     this.isPaused = false;
     return this.player.stopPlay();
   }
@@ -133,6 +142,82 @@ class LivePlayer {
     this.isMuted = mute;
     if (mute) this.player.pauseAudio();
     else if (!this.isPaused) this.player.resumeAudio();
+  }
+  startRecording(values: Map<string, Object>): void {
+    const path = values.get('filePath');
+    if (typeof path !== 'string' || path.length === 0) throw new Error('recording filePath is required');
+    if (this.videoRecorder !== null || this.sdkRecording) {
+      this.callback(this.messenger, 'onLocalRecordBegin', [-6, path]);
+      return;
+    }
+    const mode = values.get('recordMode') ?? 0;
+    if (mode !== 0 && mode !== 1) throw new Error('Invalid recording mode');
+    const interval = values.get('interval');
+    if (mode === 1) {
+      const fd = VideoOnlyRecorder.createFile(path);
+      if (fd < 0) {
+        this.callback(this.messenger, 'onLocalRecordBegin', [fd, path]);
+        return;
+      }
+      const callbacks = new VideoRecordingCallbacks(
+        (duration: number): void => { this.callback(this.messenger, 'onLocalRecording', [duration, path]); },
+        (code: number): void => {
+          this.videoRecorder = null;
+          this.callback(this.messenger, 'onLocalRecordComplete', [code, path]);
+        }
+      );
+      const recorder = new VideoOnlyRecorder(path, fd, typeof interval === 'number' ? interval : -1,
+        (): boolean => this.recordingSnapshot(recorder), callbacks);
+      this.videoRecorder = recorder;
+      this.callback(this.messenger, 'onLocalRecordBegin', [0, path]);
+      recorder.start();
+      return;
+    }
+    const params = new V2TXLiveLocalRecordingParams();
+    params.filePath = path;
+    params.recordMode = V2TXLiveRecordMode.V2TXLiveRecordModeBoth;
+    if (typeof interval === 'number') params.interval = interval;
+    this.sdkRecording = true;
+    const result = this.player.startLocalRecording(params);
+    if (result !== 0) {
+      this.sdkRecording = false;
+      throw new Error(`startLocalRecording failed: ${result}`);
+    }
+  }
+  stopRecording(): void {
+    if (this.videoRecorder !== null) this.videoRecorder.stop();
+    else this.player.stopLocalRecording();
+  }
+  snapshot(): void {
+    if (this.snapshotPending) { this.userSnapshotQueued = true; return; }
+    this.snapshotPending = true;
+    this.snapshotRecorder = null;
+    if (this.player.snapshot() !== 0) {
+      this.snapshotPending = false;
+      this.callback(this.messenger, 'onSnapshotComplete', [null]);
+    }
+  }
+  private recordingSnapshot(recorder: VideoOnlyRecorder): boolean {
+    if (this.snapshotPending) return false;
+    this.snapshotPending = true;
+    this.snapshotRecorder = recorder;
+    if (this.player.snapshot() !== 0) {
+      this.snapshotPending = false;
+      this.snapshotRecorder = null;
+      return false;
+    }
+    return true;
+  }
+  consumeRecordingSnapshot(pixelMap: image.PixelMap): boolean {
+    const recorder = this.snapshotRecorder;
+    this.snapshotPending = false;
+    this.snapshotRecorder = null;
+    if (recorder !== null) recorder.appendSnapshot(pixelMap);
+    if (this.userSnapshotQueued) {
+      this.userSnapshotQueued = false;
+      this.snapshot();
+    }
+    return recorder !== null;
   }
   event(messenger: BinaryMessenger, method: string, args: Map<string, Object>): void {
     const channel = new BasicMessageChannel<Object>(messenger, `${PREFIX}TXLivePlayerFlutterAPI.${method}.${this.id}`, codec);
@@ -281,7 +366,7 @@ class LivePlayerObserver implements V2TXLivePlayerObserver {
     this.livePlayer.event(this.messenger, 'onPlayerEvent', event);
   }
   onSnapshotComplete(_player: V2TXLivePlayer, pixelMap: image.PixelMap): void {
-    this.sendSnapshot(pixelMap);
+    if (!this.livePlayer.consumeRecordingSnapshot(pixelMap)) this.sendSnapshot(pixelMap);
   }
   private async sendSnapshot(pixelMap: image.PixelMap): Promise<void> {
     let packer: image.ImagePacker | null = null;
@@ -293,11 +378,12 @@ class LivePlayerObserver implements V2TXLivePlayerObserver {
       this.livePlayer.callback(this.messenger, 'onSnapshotComplete', [null]);
     } finally {
       if (packer !== null) await packer.release();
+      await pixelMap.release();
     }
   }
-  onLocalRecordBegin(_player: V2TXLivePlayer, code: number, path: string): void { this.livePlayer.callback(this.messenger, 'onLocalRecordBegin', [code, path]); }
+  onLocalRecordBegin(_player: V2TXLivePlayer, code: number, path: string): void { if (code !== 0 && code !== -6) this.livePlayer.sdkRecording = false; this.livePlayer.callback(this.messenger, 'onLocalRecordBegin', [code, path]); }
   onLocalRecording(_player: V2TXLivePlayer, duration: number, path: string): void { this.livePlayer.callback(this.messenger, 'onLocalRecording', [duration, path]); }
-  onLocalRecordComplete(_player: V2TXLivePlayer, code: number, path: string): void { this.livePlayer.callback(this.messenger, 'onLocalRecordComplete', [code, path]); }
+  onLocalRecordComplete(_player: V2TXLivePlayer, code: number, path: string): void { this.livePlayer.sdkRecording = false; this.livePlayer.callback(this.messenger, 'onLocalRecordComplete', [code, path]); }
 }
 
 function replyError(reply: Reply<Object>, message: string): void { reply.reply(['ohos-error', message, null]); }
@@ -308,17 +394,6 @@ function setupChannel(messenger: BinaryMessenger, name: string, handler: (args: 
 function playerById(playerId: number): LivePlayer { const player = players.get(playerId); if (!player) throw new Error('player not found'); return player; }
 function playerFrom(args: Array<Object>): LivePlayer { return playerById((args[0] as PlayerMsg).playerId); }
 
-function startLiveRecording(player: LivePlayer, values: Map<string, Object>): void {
-  const filePath = values.get('filePath');
-  if (typeof filePath !== 'string' || filePath.length === 0) throw new Error('recording filePath is required');
-  const params = new V2TXLiveLocalRecordingParams();
-  params.filePath = filePath;
-  params.recordMode = V2TXLiveRecordMode.V2TXLiveRecordModeBoth;
-  const interval = values.get('interval');
-  if (typeof interval === 'number') params.interval = interval;
-  const result = player.player.startLocalRecording(params);
-  if (result !== 0) throw new Error(`startLocalRecording failed: ${result}`);
-}
 
 export function setupSuperPlayerApi(messenger: BinaryMessenger, context: common.Context): void {
   livePremier = getV2TXLivePremierShareInstance(context);
@@ -345,6 +420,7 @@ export function setupSuperPlayerApi(messenger: BinaryMessenger, context: common.
       vodPlayers.delete(id);
     } else {
       const player = playerById(id);
+      player.stopPlay();
       releaseV2TXLivePlayer(player.player);
       players.delete(id);
     }
@@ -387,9 +463,9 @@ export function setupSuperPlayerApi(messenger: BinaryMessenger, context: common.
   setupChannel(messenger, `${live}enableReceiveSeiMessage`, (args) => {
     return playerFrom(args).player.enableReceiveSeiMessage(args[1] as boolean, args[2] as number);
   });
-  setupChannel(messenger, `${live}snapshot`, () => null);
-  setupChannel(messenger, `${live}startLocalRecording`, (args) => { const p = playerFrom(args); const map = args[0] as Map<string, Object>; const params = new V2TXLiveLocalRecordingParams(); params.filePath = map.get('filePath') as string; params.interval = map.get('interval') as number; return p.player.startLocalRecording(params); });
-  setupChannel(messenger, `${live}stopLocalRecording`, (args) => { playerFrom(args).player.stopLocalRecording(); return null; });
+  setupChannel(messenger, `${live}snapshot`, (args) => { playerFrom(args).snapshot(); return null; });
+  setupChannel(messenger, `${live}startLocalRecording`, (args) => { playerFrom(args).startRecording(args[1] as Map<string, Object>); return null; });
+  setupChannel(messenger, `${live}stopLocalRecording`, (args) => { playerFrom(args).stopRecording(); return null; });
 }
 
 function registerLiveChannels(messenger: BinaryMessenger, id: number): void {
@@ -411,15 +487,9 @@ function registerLiveChannels(messenger: BinaryMessenger, id: number): void {
   setupChannel(messenger, `${pfx}enableReceiveSeiMessage${suffix}`, (args) => {
     return get().player.enableReceiveSeiMessage(args[1] as boolean, args[2] as number);
   });
-  setupChannel(messenger, `${pfx}snapshot${suffix}`, () => {
-    const livePlayer = get();
-    if (livePlayer.player.snapshot() !== 0) {
-      livePlayer.callback(messenger, 'onSnapshotComplete', [null]);
-    }
-    return null;
-  });
-  setupChannel(messenger, `${pfx}startLocalRecording${suffix}`, (args) => { startLiveRecording(get(), args[0] as Map<string, Object>); return null; });
-  setupChannel(messenger, `${pfx}stopLocalRecording${suffix}`, () => { get().player.stopLocalRecording(); return null; });
+  setupChannel(messenger, `${pfx}snapshot${suffix}`, () => { get().snapshot(); return null; });
+  setupChannel(messenger, `${pfx}startLocalRecording${suffix}`, (args) => { get().startRecording(args[0] as Map<string, Object>); return null; });
+  setupChannel(messenger, `${pfx}stopLocalRecording${suffix}`, () => { get().stopRecording(); return null; });
 }
 
 function registerVodChannels(messenger: BinaryMessenger, id: number): void {

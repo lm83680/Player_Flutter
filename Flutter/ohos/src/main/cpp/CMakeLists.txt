@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.5.0)
+project(superplayer_recorder)
+add_library(superplayer_recorder SHARED video_surface.cpp)
+target_compile_features(superplayer_recorder PRIVATE cxx_std_17)
+target_link_libraries(superplayer_recorder PUBLIC libace_napi.z.so libnative_window.so libnative_buffer.so)
